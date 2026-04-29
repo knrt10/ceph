@@ -1319,20 +1319,42 @@ PGBackend::cmp_xattr_ierrorator::future<> PGBackend::cmp_xattr(
       ->cmp_xattr_errorator::future<> {
       delta_stats.num_rd++;
       delta_stats.num_rd_kb += shift_round_up(osd_op.op.xattr.value_len, 10);
-
-      // RGW delete uses cmpxattr with an empty expected value and expects a
-      // missing xattr to compare equal (classic OSD behavior).
-      if (osd_op.op.xattr.cmp_op == CEPH_OSD_CMPXATTR_OP_EQ) {
-        auto bp = osd_op.indata.cbegin();
-        bp += osd_op.op.xattr.name_len;
-        if (osd_op.op.xattr.cmp_mode == CEPH_OSD_CMPXATTR_MODE_STRING) {
-          string lhs;
-          bp.copy(osd_op.op.xattr.value_len, lhs);
-          if (lhs.empty()) {
-            osd_op.rval = 1;
-            return cmp_xattr_errorator::now();
-          }
+      // Match classic OSD semantics for missing xattrs:
+      // treat missing rhs as an empty string or numeric zero and run the
+      // requested comparison instead of failing immediately.
+      auto bp = osd_op.indata.cbegin();
+      bp += osd_op.op.xattr.name_len;
+      int result = -EINVAL;
+      switch (osd_op.op.xattr.cmp_mode) {
+      case CEPH_OSD_CMPXATTR_MODE_STRING:
+      {
+        string lhs;
+        bp.copy(osd_op.op.xattr.value_len, lhs);
+        result = do_cmp_xattr(osd_op.op.xattr.cmp_op, lhs, std::string_view{});
+        break;
+      }
+      case CEPH_OSD_CMPXATTR_MODE_U64:
+      {
+        uint64_t lhs;
+        try {
+          decode(lhs, bp);
+        } catch (ceph::buffer::error&) {
+          return crimson::ct_error::invarg::make();
         }
+        bufferlist empty_rhs;
+        result = do_xattr_cmp_u64(osd_op.op.xattr.cmp_op, lhs, empty_rhs);
+        break;
+      }
+      default:
+        return crimson::ct_error::invarg::make();
+      }
+
+      if (result == -EINVAL) {
+        return crimson::ct_error::invarg::make();
+      }
+      if (result > 0) {
+        osd_op.rval = 1;
+        return cmp_xattr_errorator::now();
       }
       logger().debug("cmpxattr: xattr does not exist, comparison failed");
       return crimson::ct_error::ecanceled::make();
