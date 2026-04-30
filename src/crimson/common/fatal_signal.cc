@@ -95,20 +95,37 @@ void FatalSignal::install_oneshot_signal_handler()
   // about e.g. sigreturn(2) calling; see the man page).
   constexpr std::size_t FRAMES_TO_SKIP = 2 + 1;
 
+  // During shutdown (or when a fatal signal races with shutdown),
+  // engine_is_ready() may be false and engine() would dereference a null
+  // thread-local reactor pointer. Avoid touching engine() in that case.
+  auto* engine = seastar::local_engine;
+  const bool engine_ready = (engine != nullptr);
+  const std::string shard_str = engine_ready
+    ? std::to_string(seastar::this_shard_id())
+    : "no shard";
+
   // Let's inform regarding the abort before getting the stacktrace
-   std::string pre_backtrace = fmt::format(
+  std::string pre_backtrace = fmt::format(
     "Aborting {} on shard {} - Stopping all shards",
     cause,
-    seastar::engine_is_ready() ? std::to_string(seastar::this_shard_id()) : "no shard");
+    shard_str);
 
   GENERIC_ERROR("{}", pre_backtrace);
   std::cerr << pre_backtrace << std::flush;
 
-  seastar::engine().exit(1);
+  if (!engine_ready) {
+    // Do not call engine()->exit or build boost::stacktrace without a live
+    // reactor; both can fault again inside this async signal handler.
+    std::cerr << "Seastar reactor not ready; skipping exit and stacktrace.\n"
+              << std::flush;
+    return;
+  }
+
+  engine->exit(1);
 
   std::string backtrace = fmt::format("{} on shard {}  \nBacktrace:\n {}",
     cause,
-    seastar::engine_is_ready() ? std::to_string(seastar::this_shard_id()) : "no shard",
+    shard_str,
     boost::stacktrace::to_string(boost::stacktrace::stacktrace(
     FRAMES_TO_SKIP,
     static_cast<std::size_t>(-1)/* max depth same as the default one */)));
