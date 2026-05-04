@@ -1267,7 +1267,54 @@ PGBackend::cmp_xattr_ierrorator::future<> PGBackend::cmp_xattr(
   std::string name{"_"};
   auto bp = osd_op.indata.cbegin();
   bp.copy(osd_op.op.xattr.name_len, name);
- 
+
+  // Classic OSD treats missing xattr as empty/zero for the comparison.
+  // Apply the same when get_attr reports ENODATA, and when it reports
+  // ENOENT but the PG still considers the object present (avoids RGW
+  // apply_olh_log treating a conditional mismatch as a hard ENOENT).
+  auto cmpxattr_compare_missing_rhs =
+    [&delta_stats, &osd_op]() -> cmp_xattr_errorator::future<> {
+      delta_stats.num_rd++;
+      delta_stats.num_rd_kb +=
+        shift_round_up(osd_op.op.xattr.value_len, 10);
+      auto rhs_bp = osd_op.indata.cbegin();
+      rhs_bp += osd_op.op.xattr.name_len;
+      int result = -EINVAL;
+      switch (osd_op.op.xattr.cmp_mode) {
+      case CEPH_OSD_CMPXATTR_MODE_STRING:
+      {
+        string lhs;
+        rhs_bp.copy(osd_op.op.xattr.value_len, lhs);
+        result = do_cmp_xattr(osd_op.op.xattr.cmp_op, lhs, std::string_view{});
+        break;
+      }
+      case CEPH_OSD_CMPXATTR_MODE_U64:
+      {
+        uint64_t lhs;
+        try {
+          decode(lhs, rhs_bp);
+        } catch (ceph::buffer::error&) {
+          return crimson::ct_error::invarg::make();
+        }
+        bufferlist empty_rhs;
+        result = do_xattr_cmp_u64(osd_op.op.xattr.cmp_op, lhs, empty_rhs);
+        break;
+      }
+      default:
+        return crimson::ct_error::invarg::make();
+      }
+
+      if (result == -EINVAL) {
+        return crimson::ct_error::invarg::make();
+      }
+      if (result > 0) {
+        osd_op.rval = 1;
+        return cmp_xattr_errorator::now();
+      }
+      logger().debug("cmpxattr: xattr does not exist, comparison failed");
+      return crimson::ct_error::ecanceled::make();
+    };
+
   logger().debug("cmpxattr on obj={} for attr={}", os.oi.soid, name);
   return getxattr(os.oi.soid, std::move(name)).safe_then_interruptible(
     [&delta_stats, &osd_op] (auto &&xattr) -> cmp_xattr_ierrorator::future<> {
@@ -1315,49 +1362,18 @@ PGBackend::cmp_xattr_ierrorator::future<> PGBackend::cmp_xattr(
       return cmp_xattr_ierrorator::now();
     }
   }).handle_error_interruptible(
-    crimson::ct_error::enodata::handle([&delta_stats, &osd_op] ()
+    crimson::ct_error::enodata::handle([&cmpxattr_compare_missing_rhs] ()
       ->cmp_xattr_errorator::future<> {
-      delta_stats.num_rd++;
-      delta_stats.num_rd_kb += shift_round_up(osd_op.op.xattr.value_len, 10);
-      // Match classic OSD semantics for missing xattrs:
-      // treat missing rhs as an empty string or numeric zero and run the
-      // requested comparison instead of failing immediately.
-      auto bp = osd_op.indata.cbegin();
-      bp += osd_op.op.xattr.name_len;
-      int result = -EINVAL;
-      switch (osd_op.op.xattr.cmp_mode) {
-      case CEPH_OSD_CMPXATTR_MODE_STRING:
-      {
-        string lhs;
-        bp.copy(osd_op.op.xattr.value_len, lhs);
-        result = do_cmp_xattr(osd_op.op.xattr.cmp_op, lhs, std::string_view{});
-        break;
-      }
-      case CEPH_OSD_CMPXATTR_MODE_U64:
-      {
-        uint64_t lhs;
-        try {
-          decode(lhs, bp);
-        } catch (ceph::buffer::error&) {
-          return crimson::ct_error::invarg::make();
-        }
-        bufferlist empty_rhs;
-        result = do_xattr_cmp_u64(osd_op.op.xattr.cmp_op, lhs, empty_rhs);
-        break;
-      }
-      default:
-        return crimson::ct_error::invarg::make();
-      }
-
-      if (result == -EINVAL) {
-        return crimson::ct_error::invarg::make();
-      }
-      if (result > 0) {
-        osd_op.rval = 1;
-        return cmp_xattr_errorator::now();
-      }
-      logger().debug("cmpxattr: xattr does not exist, comparison failed");
-      return crimson::ct_error::ecanceled::make();
+      return cmpxattr_compare_missing_rhs();
+    }),
+    crimson::ct_error::enoent::handle([&os, &cmpxattr_compare_missing_rhs] ()
+      ->cmp_xattr_errorator::future<> {
+      logger().debug(
+        "cmpxattr: ENOENT from get_attr on {} (os.exists={}); "
+        "using missing-xattr compare path",
+        os.oi.soid,
+        os.exists);
+      return cmpxattr_compare_missing_rhs();
     }),
     cmp_xattr_errorator::pass_further{}
   );
