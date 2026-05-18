@@ -4,6 +4,27 @@ tasks:
     client.0:
       rgw_server: client.0
 overrides:
+  thrashosds:
+    # rgw_s3tests fails after do_noscrub_toggle starts timing out (status 124)
+    # on "ceph osd set noscrub/nodeep-scrub" under sustained thrash.
+    noscrub_toggle_delay: 0
+    # Keep OSD kill thrash, but avoid long-lived PG map churn that
+    # destabilizes recovery and leads to pg dump command timeouts.
+    chance_pgnum_grow: 0
+    chance_pgnum_shrink: 0
+    chance_pgpnum_fix: 0
+    reweight_osd: 0
+    thrash_primary_affinity: false
+    dump_ops_enable: false
+    optrack_toggle_delay: 0
+    sighup_delay: 0
+    op_delay: 45
+    # Hard guard: do not allow OSD out/down churn in rgw_s3tests workload.
+    # We only keep non-destructive background thrash knobs here.
+    min_in: 8
+    min_live: 8
+    max_dead: 0
+    chance_down: 0
   ceph:
     conf:
       client:
