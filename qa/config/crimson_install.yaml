@@ -10,3 +10,7 @@ tasks:
 - pexec:
     all:
       - sudo update-alternatives --set ceph-osd /usr/bin/ceph-osd-crimson
+- pexec:
+    all:
+      - sudo dnf -y install 'c-ares >= 1.28.0'
+      - rpm -q c-ares
