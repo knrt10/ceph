@@ -188,6 +188,7 @@ public:
       F &&f) {
     ceph_assert(op->use_count() == 1);
     if (seastar::this_shard_id() == core) {
+      ++get_local_state().pg_ops_same_core;
       auto f_conn = op->prepare_remote_submission();
       op->finish_remote_submission(std::move(f_conn));
       auto &target_shard_services = shard_services.local();
@@ -196,6 +197,7 @@ public:
         target_shard_services,
         std::move(op));
     }
+    ++get_local_state().pg_ops_cross_core;
     // Note: the ordering in only preserved until f is invoked.
     auto &opref = *op;
     auto &crosscore_ordering = get_osd_priv(

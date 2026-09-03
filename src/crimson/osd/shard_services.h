@@ -214,6 +214,29 @@ class PerShardState {
   // longer than the most recent IO in each object.
   ECExtentCache::LRU ec_extent_cache_lru;
 
+  // Cross-core op-routing metrics (per shard).
+  //
+  // Every PG-targeted ordered op is first handled on the core that received
+  // it. If the op's PG is owned by this same core it runs locally; otherwise
+  // it must hop to the owning core via seastar::smp::submit_to (invoke_on).
+  // These counters split ops by that decision so we can measure how often
+  // client ops cross cores -- the main source of cross-core cost.
+  uint64_t pg_ops_same_core = 0;
+  uint64_t pg_ops_cross_core = 0;
+
+  // Client write-data copy accounting (per shard).
+  //
+  // On the PG-owning core, MOSDOp::finish_decode() runs
+  // OSDOp::split_osd_op_vector_in_data(), which copies the incoming write
+  // payload out of the message into per-op buffers. This is the "copied" step
+  // of the client write bufferlist lifecycle (allocated -> copied -> freed).
+  // These track how many ops carried copied data and the total bytes copied.
+  uint64_t write_data_copy_ops = 0;
+  uint64_t write_data_copy_bytes = 0;
+
+  seastar::metrics::metric_groups metrics;
+  void register_metrics();
+
 public:
   PerShardState(
     int whoami,
@@ -584,6 +607,13 @@ public:
   }
 
   auto &get_registry() { return local_state.registry; }
+
+  /// Account for the client write-data copy performed on this core by
+  /// MOSDOp::finish_decode() (OSDOp::split_osd_op_vector_in_data).
+  void account_write_data_copy(size_t bytes) {
+    ++local_state.write_data_copy_ops;
+    local_state.write_data_copy_bytes += bytes;
+  }
 
   // Loggers
   PerfCounters &get_recoverystate_perf_logger() {

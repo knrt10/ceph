@@ -3,6 +3,8 @@
 
 #include <boost/smart_ptr/make_local_shared.hpp>
 
+#include <seastar/core/metrics.hh>
+
 #include "crimson/osd/shard_services.h"
 
 #include "messages/MOSDAlive.h"
@@ -52,7 +54,40 @@ PerShardState::PerShardState(
       (std::numeric_limits<ceph_tid_t>::digits - 8)),
     startup_time(ceph::mono_clock::now()),
     ec_extent_cache_lru(crimson::common::local_conf().get_val<uint64_t>("ec_extent_cache_size"))
-{}
+{
+  register_metrics();
+}
+
+void PerShardState::register_metrics()
+{
+  namespace sm = seastar::metrics;
+  metrics.add_group("osd", {
+    sm::make_counter(
+      "pg_ops_same_core",
+      [this] { return pg_ops_same_core; },
+      sm::description(
+        "PG-targeted ordered ops handled on the core that received them "
+        "(PG owned by this core; no cross-core hop)")),
+    sm::make_counter(
+      "pg_ops_cross_core",
+      [this] { return pg_ops_cross_core; },
+      sm::description(
+        "PG-targeted ordered ops routed to another core because the PG is "
+        "owned there (required a cross-core submit_to)")),
+    sm::make_counter(
+      "write_data_copy_ops",
+      [this] { return write_data_copy_ops; },
+      sm::description(
+        "client ops whose write payload was copied into per-op buffers by "
+        "finish_decode/split_osd_op_vector_in_data on this core")),
+    sm::make_counter(
+      "write_data_copy_bytes",
+      [this] { return write_data_copy_bytes; },
+      sm::description(
+        "total bytes of client write data copied by "
+        "finish_decode/split_osd_op_vector_in_data on this core")),
+  });
+}
 
 seastar::future<> PerShardState::dump_ops_in_flight(Formatter *f) const
 {

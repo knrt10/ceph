@@ -279,6 +279,12 @@ seastar::future<> ClientRequest::with_pg(
   pgref->client_request_orderer.add_request(*this);
 
   if (m->finish_decode()) {
+    // finish_decode() ran OSDOp::split_osd_op_vector_in_data(), copying the
+    // message's write payload into per-op buffers on this (PG-owning) core.
+    // Account the copied bytes to measure the client-write copy cost.
+    if (const auto copied = m->get_data().length(); copied > 0) {
+      shard_services->account_write_data_copy(copied);
+    }
     m->clear_payload();
   }
 
